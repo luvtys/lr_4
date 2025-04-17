@@ -1,0 +1,165 @@
+create table positions(
+id_position int primary key auto_increment, 
+p_name varchar (40) not null, 
+p_salary decimal (8, 2)
+);
+
+create table donations_type (
+id_donat  int primary key auto_increment, 
+d_name varchar (40), 
+size decimal (8, 2)
+);
+
+create table operation_type (
+id_operation  int primary key auto_increment, 
+op_name varchar (40)
+);
+
+create table position_donations (
+id_pos int  primary key auto_increment, 
+id_position int, 
+foreign key (id_position) references positions (id_position), 
+id_donat int, 
+foreign key (id_donat) references  donations_type (id_donat)
+);
+
+create table calculations (
+id_calcul int primary key auto_increment, 
+c_datetime datetime, 
+c_summ decimal (8, 2), 
+id_operation int, 
+foreign key (id_operation) references operation_type (id_operation), 
+id_position int, 
+foreign key (id_position) references positions (id_position)
+);
+
+INSERT INTO positions (`id_position`, `p_name`, `p_salary`) VALUES
+('1', 'Менеджер', 50000.00),
+('2', 'Разработчик', 80000.00),
+('3', 'Дизайнер', 60000.00),
+('4', 'Аналитик', 70000.00),
+('5', 'Тестировщик', 55000.00);
+
+INSERT INTO donations_type (`id_donat`, `d_name`, `size`) VALUES
+('1', 'ФСС', 20000.00),
+('2', 'Пенсионный фонд', 50000.00),
+('3', 'ФСС по травматизму', 10000.00),
+('4', 'ФФОМС', 15000.00);
+
+INSERT INTO operation_type (`id_operation`, `op_name`) VALUES
+('1', 'Заработная плата к выплате'),
+('2', 'Сумма страховых взносов');
+
+INSERT INTO position_donations (`id_pos`, `id_position`, `id_donat`) VALUES
+('1', 1, 1),
+('2', 2, 2),
+('3', 3, 3),
+('4', 4, 4);
+
+INSERT INTO calculations (`id_calcul`, `c_datetime`, `c_summ`, `id_operation`, `id_position`) VALUES
+('1', '2023-01-15 10:00:00', 50000.00, 1, 1),
+('2', '2023-01-15 10:05:00', 6500.00, 2, 1),
+('3', '2023-01-20 11:00:00', 20000.00, 2, 2),
+('4', '2023-01-25 09:30:00', 30000.00, 1, 3),
+('5', '2023-02-01 12:00:00', 42000.00, 2, 4);
+
+
+CREATE TABLE IF NOT EXISTS calc_log (
+    id_log INT PRIMARY KEY AUTO_INCREMENT,
+    log_datetime DATETIME NOT NULL,
+    log_message VARCHAR(255) NOT NULL,
+    id_position INT NOT NULL,
+    id_operation INT NOT NULL,
+    calculated_amount DECIMAL(8, 2) NOT NULL,
+    FOREIGN KEY (id_position) REFERENCES positions(id_position),
+    FOREIGN KEY (id_operation) REFERENCES operation_type(id_operation)
+);
+
+
+DELIMITER //
+CREATE FUNCTION CalculateAmount(
+    p_id_position INT,
+    p_id_operation INT
+) RETURNS DECIMAL(8, 2)
+DETERMINISTIC
+BEGIN
+    DECLARE base_salary DECIMAL(8, 2);
+    DECLARE total_donations DECIMAL(8, 2) DEFAULT 0;
+    
+    -- Получаем базовую зарплату для должности
+    SELECT p_salary INTO base_salary FROM positions WHERE id_position = p_id_position;
+    
+    -- Если операция - страховые взносы (id_operation = 2)
+    IF p_id_operation = 2 THEN
+        -- Суммируем все взносы для данной должности
+        SELECT COALESCE(SUM(dt.size), 0) INTO total_donations
+        FROM position_donations pd
+        JOIN donations_type dt ON pd.id_donat = dt.id_donat
+        WHERE pd.id_position = p_id_position;
+        
+        RETURN total_donations;
+    -- Если операция - зарплата к выплате (id_operation = 1)
+    ELSEIF p_id_operation = 1 THEN
+        -- Вычисляем зарплату за вычетом взносов
+        SELECT COALESCE(SUM(dt.size), 0) INTO total_donations
+        FROM position_donations pd
+        JOIN donations_type dt ON pd.id_donat = dt.id_donat
+        WHERE pd.id_position = p_id_position;
+        
+        RETURN base_salary - total_donations;
+    ELSE
+        RETURN 0;
+    END IF;
+END //
+DELIMITER ;
+
+
+DELIMITER //
+CREATE PROCEDURE ProcessCalculation(
+    IN p_id_position INT,
+    IN p_id_operation INT
+)
+BEGIN
+    DECLARE calculated_amount DECIMAL(8, 2);
+    DECLARE operation_name VARCHAR(40);
+    DECLARE position_name VARCHAR(40);
+    
+    -- Вызываем функцию для расчета суммы
+    SET calculated_amount = CalculateAmount(p_id_position, p_id_operation);
+    
+    -- Получаем название операции и должности
+    SELECT op_name INTO operation_name FROM operation_type WHERE id_operation = p_id_operation;
+    SELECT p_name INTO position_name FROM positions WHERE id_position = p_id_position;
+    
+    -- Вставляем запись о расчете
+    INSERT INTO calculations (c_datetime, c_summ, id_operation, id_position)
+    VALUES (NOW(), calculated_amount, p_id_operation, p_id_position);
+    
+    -- Выводим информацию о выполненной операции
+    SELECT CONCAT('Расчет выполнен: ', operation_name, ' для ', position_name, 
+                 ' (ID:', p_id_position, '). Сумма: ', calculated_amount) AS result;
+END //
+DELIMITER ;
+
+
+DELIMITER //
+CREATE TRIGGER after_calculation_insert
+AFTER INSERT ON calculations
+FOR EACH ROW
+BEGIN
+    DECLARE position_name VARCHAR(40);
+    DECLARE operation_name VARCHAR(40);
+    
+    -- Получаем название должности и операции
+    SELECT p_name INTO position_name FROM positions WHERE id_position = NEW.id_position;
+    SELECT op_name INTO operation_name FROM operation_type WHERE id_operation = NEW.id_operation;
+    
+    -- Записываем в лог (используем правильные имена полей)
+    INSERT INTO calc_log (log_datetime, log_message, id_position, id_operation, calculated_amount)
+    VALUES (NOW(), 
+            CONCAT('Новый расчет: ', operation_name, ' для ', position_name),
+            NEW.id_position,
+            NEW.id_operation,
+            NEW.c_summ);
+END //
+DELIMITER ;
